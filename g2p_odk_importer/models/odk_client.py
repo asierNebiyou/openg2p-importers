@@ -2,7 +2,7 @@ import json
 import logging
 
 import pyjq
-import requests
+import requests,pprint
 
 from odoo import _
 from odoo.exceptions import ValidationError
@@ -48,6 +48,7 @@ class ODKClient:
             raise ValidationError(f"Login failed: {e}") from e
 
     def test_connection(self):
+        _logger.info('imported')
         if not self.session:
             raise ValidationError(_("Session not created"))
         info_url = f"{self.base_url}/v1/users/current"
@@ -92,8 +93,11 @@ class ODKClient:
         data = response.json()
 
         for member in data["value"]:
+
             try:
                 mapped_json = pyjq.compile(self.json_formatter).all(member)[0]
+                unsaved_individual = pyjq.compile(self.json_formatter).all(member)[0]
+
 
                 if self.target_registry == "individual":
                     mapped_json.update({"is_registrant": True, "is_group": False})
@@ -116,7 +120,10 @@ class ODKClient:
                         for phone in mapped_json["phone_number_ids"]
                     ]
 
+                #
+
                 # Membership one2many
+                individual_data_for_relationship=[]
                 if "group_membership_ids" in mapped_json and self.target_registry == "group":
                     individual_ids = []
                     for individual_mem in mapped_json.get("group_membership_ids"):
@@ -124,8 +131,11 @@ class ODKClient:
                         individual = self.env["res.partner"].sudo().create(individual_data)
                         if individual:
                             kind = self.get_member_kind(individual_mem)
-
                             individual_data = {"individual": individual.id}
+
+                            # check if relationship field exists and if it does we pass it to create a relationship
+                            if individual_mem['household_member'].get('relationship_with_household_head'):
+                                individual_data_for_relationship.append({"individual": individual.id,"relationship_with_household_head":individual_mem['household_member'].get('relationship_with_household_head')})
 
                             if kind:
                                 individual_data["kind"] = [(4, kind.id)]
@@ -133,6 +143,7 @@ class ODKClient:
                             individual_ids.append((0, 0, individual_data))
 
                     mapped_json["group_membership_ids"] = individual_ids
+
 
                 # Reg_ids one2many
                 if "reg_ids" in mapped_json:
@@ -152,14 +163,34 @@ class ODKClient:
                         )
                         for reg_id in mapped_json["reg_ids"]
                     ]
+                # updated_mapped_json = self.get_addl_data(mapped_json)
 
-                updated_mapped_json = self.get_addl_data(mapped_json)
 
-                # update value into the res_partner table
-                self.env["res.partner"].sudo().create(updated_mapped_json)
+                # we passed a new param that includes the user id and relationship
+                # updated_mapped_json = self.get_addl_data(individual_data_for_relationship)
+
+                #Relationship One2many
+                # if individual_data_for_relationship:
+                relationship_ids = []
+                _logger.info("member main ######### %s", individual_data_for_relationship)
+
+                for member in individual_data_for_relationship:
+                    _logger.info("member ######### %s",member)
+                    member_id = member['individual']
+                    relation_id = self.env["g2p.relationship"].search(
+                        [("name", "=", member['relationship_with_household_head'])], limit=1)
+                    if relation_id:
+                        rel ={}
+                        rel['source'] = member_id
+                        rel['relation'] = relation_id.id
+
+                        relationship_ids.append((0,0, rel))
+                
+                mapped_json["related_1_ids"] = relationship_ids
+                self.env["res.partner"].sudo().create(mapped_json)
                 data.update({"form_updated": True})
             except AttributeError as ex:
-                data.update({"form_failed": True})
+                # data.update({"form_failed": True})
                 _logger.error("Attribute Error", ex)
             except Exception as ex:
                 data.update({"form_failed": True})
@@ -202,7 +233,9 @@ class ODKClient:
 
         return vals
 
-    def get_addl_data(self, mapped_json):
-        # Override this method to add more data
+    # accepts relations parameter which is of type array [{individual:'individuals_id',relationship_with_household_head:'the relationship with head'}]
+    # returns member id and relation id  that is required to create relationship
+    def get_addl_data(self, relations):
+        pass
 
-        return mapped_json
+
